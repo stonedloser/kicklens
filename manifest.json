@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "KickLens: Stream Analyzer",
+  "short_name": "KickLens",
+  "version": "1.0.0",
+  "description": "Supercharge your Kick.com experience. Instantly reveal hidden profile data, track live chat analytics, and access real-time moderation logs.",
+  "author": "StonedLoser",
+  "homepage_url": "https://stonedloser.com/kick/inspector/",
+  "icons": {
+	"16": "assets/icon16.png",
+	"32": "assets/icon32.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
+  "host_permissions": [
+    "*://*.kick.com/*"
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "options_page": "settings.html",
+  "content_scripts": [
+    {
+      "matches": ["*://*.kick.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
