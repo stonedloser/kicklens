@@ -16,7 +16,10 @@ Not all chat is equal. KickLens weights messages by effort so spam and emoji flo
 | 4–7 words | 2.0 |
 | 8+ words | 3.0 |
 
-**Moderation Log**
+**Searchable Chat Log**
+A real-time, searchable chat history interface. Instantly filter the chat by Mods, Subs, Bots, or Emoji/Emote-only messages. Includes native Kick emote rendering so you can actually read what's being spammed.
+
+**Moderation Log (Activity)**
 Live feed of bans, timeouts, and deleted messages pulled straight from the WebSocket — including stuff AutoMod nukes before you'd ever see it.
 
 **Profile Inspector**
@@ -26,7 +29,7 @@ Channel IDs, User IDs, verification status, slow mode settings, follower-only du
 CCV, peak viewers, average viewers, messages per minute. All tracked locally for your current session.
 
 **Raw WebSocket Debugger**
-See the raw Pusher payloads coming in if you want to know exactly what Kick is sending.
+A dedicated "Raw JSON" tab streaming the raw Pusher payloads in real-time if you want to know exactly what Kick is sending under the hood.
 
 **Bot Filtering**
 Add bots to an exclusion list in settings so they don't skew your engagement numbers.
@@ -64,10 +67,6 @@ KickLens hooks into Kick's Pusher connection (key: `32cbd69e4b950bf97679`) and l
 
 ## Usage
 
-- **The badge** — shows live engagement rate next to the Follow button. Click it for the full analytics dashboard.
-- **The icon** — magnifying glass opens the Profile Inspector and moderation log.
-- **Settings** — right-click the extension icon → Options to manage your bot list.
-
----
-
-Made by [StonedLoser](https://stonedloser.com/)
+- **The Badge** — Shows the live engagement rate next to the channel's Follow/Subscribe buttons. 
+- **Unified Insights Modal** — Click the engagement badge to open the master dashboard. From here, you can switch between **Live Analytics**, **Profile**, **Activity**, **Chat Log**, and **Raw JSON** tabs.
+- **Settings** — Right-click the extension icon in your browser toolbar → Options to manage your bot exclusion list.
