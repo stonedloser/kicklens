@@ -7,6 +7,9 @@ let isFetchingChannel = false;
 let channelActivity = []; // Array to store realtime channel events
 let processedMsgIds = new Set(); // Prevent duplicate processing of the same message
 
+// Global filter state for Chat Log
+let chatLogFilters = { text: '', bots: false, mods: false, subs: false, emoji: false };
+
 let excludedKickBots = [
     "kicklet", "kickbot"
 ];
@@ -48,7 +51,9 @@ let chatAnalytics = {
     messageHistory: [], 
     lastTrendRecordTime: Date.now(),
     engagementTrend: [],
-    recentMessages: new Map() // Caches up to 1000 recent messages for deletion lookups
+    recentMessages: new Map(), // Caches up to 1000 recent messages for deletion lookups
+    rawEvents: [], // Stores raw JSON payloads for the Raw JSON tab
+    chatLog: []    // NEW: Stores rich chat objects for the Chat Log tab
 };
 
 // Determine if the current URL is a channel page
@@ -61,6 +66,17 @@ function getChannelName() {
         return match[1];
     }
     return null;
+}
+
+// Utility to escape HTML and prevent XSS
+function escapeHtml(unsafe) {
+    if (!unsafe) return "";
+    return unsafe
+         .replace(/&/g, "&amp;")
+         .replace(/</g, "&lt;")
+         .replace(/>/g, "&gt;")
+         .replace(/"/g, "&quot;")
+         .replace(/'/g, "&#039;");
 }
 
 // Inline SVGs
@@ -165,9 +181,9 @@ function parseActivityEvent(eventName, data) {
         color = '#f59e0b';
 
         if (cachedMsg) {
-            extraHtml = `<div style="margin-top:6px; font-style:italic; color:#d4d4d8; padding:6px 10px; background:rgba(0,0,0,0.2); border-radius:4px; border-left:2px solid ${color}; word-break: break-word;">"${cachedMsg.content}"</div>`;
+            extraHtml = `<div style="margin-top:6px; font-style:italic; color:#d4d4d8; padding:6px 10px; background:rgba(0,0,0,0.2); border-radius:4px; border-left:2px solid ${color}; word-break: break-word;">"${escapeHtml(cachedMsg.content)}"</div>`;
         } else if (data.message?.content) {
-            extraHtml = `<div style="margin-top:6px; font-style:italic; color:#d4d4d8; padding:6px 10px; background:rgba(0,0,0,0.2); border-radius:4px; border-left:2px solid ${color}; word-break: break-word;">"${data.message.content}"</div>`;
+            extraHtml = `<div style="margin-top:6px; font-style:italic; color:#d4d4d8; padding:6px 10px; background:rgba(0,0,0,0.2); border-radius:4px; border-left:2px solid ${color}; word-break: break-word;">"${escapeHtml(data.message.content)}"</div>`;
         } else {
             extraHtml = `<div style="margin-top:6px; font-style:italic; color:#71717a; padding:6px 10px; background:rgba(0,0,0,0.2); border-radius:4px; border-left:2px solid ${color};"><em>[Message content unavailable (sent before you joined)]</em></div>`;
         }
@@ -220,7 +236,9 @@ function connectPusher(chatroomId, initialCCV, channelId) {
             messageHistory: [],
             lastTrendRecordTime: Date.now(),
             engagementTrend: [],
-            recentMessages: new Map()
+            recentMessages: new Map(),
+            rawEvents: [],
+            chatLog: [] // Reset Chat Log on new channel
         };
         processedMsgIds.clear();
     }
@@ -252,6 +270,13 @@ function connectPusher(chatroomId, initialCCV, channelId) {
                 innerData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
             }
 
+            // Store Raw JSON for the Raw Tab
+            if (data.event !== "pusher:ping" && data.event !== "pusher:pong") {
+                chatAnalytics.rawEvents.unshift({ timestamp: new Date().toLocaleTimeString(), payload: data });
+                if (chatAnalytics.rawEvents.length > 500) chatAnalytics.rawEvents.pop(); // keep last 500 events
+                updateRawJsonTabIfOpen();
+            }
+
             if (data.event === "pusher:ping") {
                 chatWs.send(JSON.stringify({ event: "pusher:pong" }));
             } else if (data.event && data.event.includes("ChatMessageEvent")) {
@@ -267,9 +292,39 @@ function connectPusher(chatroomId, initialCCV, channelId) {
 
                 const username = innerData.sender?.username || 'unknown';
                 const lowerUsername = username.toLowerCase();
-                if (combinedExcludedBots.has(lowerUsername)) return;
-
                 const content = innerData.content || '';
+                
+                // Identify roles, bots, and emoji-only
+                const isBot = combinedExcludedBots.has(lowerUsername);
+                const badges = innerData.sender?.identity?.badges || [];
+                const isMod = badges.some(b => b.type === 'moderator' || b.type === 'broadcaster');
+                const isSub = badges.some(b => b.type === 'subscriber');
+
+                // Determine if it's emoji/emote only (Strip emotes [emote:id:name], emojis, and spaces. If empty, it's emoji-only)
+                const textWithoutEmotes = content.replace(/\[emote:\d+:[^\]]+\]/g, '');
+                const plainText = textWithoutEmotes.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}\s]/gu, '');
+                const isEmoji = content.trim().length > 0 && plainText.length === 0;
+
+                // 1. Add to Chat Log Tab
+                chatAnalytics.chatLog.unshift({
+                    id: msgId,
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                    username: username,
+                    lowerUsername: lowerUsername,
+                    content: content,
+                    isBot: isBot,
+                    isMod: isMod,
+                    isSub: isSub,
+                    isEmoji: isEmoji,
+                    color: innerData.sender?.identity?.color || '#ffffff'
+                });
+                
+                if (chatAnalytics.chatLog.length > 1000) chatAnalytics.chatLog.pop();
+                updateChatLogTabIfOpen();
+
+                // 2. Prevent Bot messages from skewing standard Engagement analytics
+                if (isBot) return;
+
                 const words = countWords(content);
                 const msgWeight = getMessageWeight(content);
 
@@ -287,6 +342,7 @@ function connectPusher(chatroomId, initialCCV, channelId) {
                 chatAnalytics.topUsernames.set(username, (chatAnalytics.topUsernames.get(username) || 0) + 1);
                 chatAnalytics.messageHistory.push({ ts: Date.now(), user: lowerUsername, weight: msgWeight });
                 updateAnalyticsUI();
+                
             } else if (data.event && !data.event.includes("pusher:")) {
                 parseActivityEvent(data.event, innerData);
             }
@@ -348,16 +404,10 @@ function injectInlineUI(channelData) {
         const badge = document.createElement('div');
         badge.className = 'ki-engagement-badge ki-clickable-badge';
         badge.innerHTML = `${icons.activity} <span id="ki-eng-text">0.0%</span>`;
-        badge.title = "Chat Engagement Rate (Click for Analytics)";
-        badge.onclick = () => openAnalyticsModal(channelData);
+        badge.title = "View Insights & Analytics";
+        // Unified Modal Entry Point
+        badge.onclick = () => openEngagementModal(channelData); 
         wrapper.appendChild(badge);
-        
-        const btn = document.createElement('button');
-        btn.className = 'ki-inline-btn-style';
-        btn.innerHTML = `${icons.search}`;
-        btn.title = "Inspect Profile & Activity";
-        btn.onclick = () => openModal(channelData);
-        wrapper.appendChild(btn);
 
         let targetContainer = actionBtn.parentElement;
         if (targetContainer && targetContainer.children.length === 1 && targetContainer.parentElement) {
@@ -374,7 +424,8 @@ function injectInlineUI(channelData) {
     }
 }
 
-function openModal(channelData) {
+// Unified Master Modal Function
+function openEngagementModal(channelData) {
     const existing = document.getElementById('kick-inspector-root');
     if (existing) existing.remove();
 
@@ -383,25 +434,48 @@ function openModal(channelData) {
     
     root.innerHTML = `
         <div class="ki-modal-overlay">
-            <div class="ki-modal">
+            <div class="ki-modal" style="max-width: 800px;">
                 <div class="ki-modal-header" style="border-bottom: none; padding-bottom: 0;">
                     <h2 style="margin:0; padding-bottom: 16px; font-size:16px; font-weight:700; display:flex; align-items:center; gap:8px;">
-                        ${icons.search} Inspecting <span style="color:#53fc18">@${channelData.slug}</span>
+                        ${icons.activity} Insights: <span style="color:#53fc18">@${channelData.slug}</span>
                     </h2>
                     <button class="ki-modal-close" id="ki-close-btn" style="margin-bottom: 16px;">${icons.close}</button>
                 </div>
                 
                 <div class="ki-modal-tabs">
-                    <button class="ki-tab active" id="tab-btn-profile">Profile</button>
+                    <button class="ki-tab active" id="tab-btn-analytics">Live Analytics</button>
+                    <button class="ki-tab" id="tab-btn-profile">Profile</button>
                     <button class="ki-tab" id="tab-btn-activity">Activity</button>
+                    <button class="ki-tab" id="tab-btn-chat">Chat Log</button>
+                    <button class="ki-tab" id="tab-btn-raw">Raw JSON</button>
                 </div>
 
                 <div class="ki-modal-content" id="ki-content">
-                    <div id="ki-profile-tab" class="ki-tab-content active">
+                    <div id="ki-analytics-tab" class="ki-tab-content active"></div>
+                    
+                    <div id="ki-profile-tab" class="ki-tab-content">
                         <div class="ki-loader"></div>
                         <div style="text-align:center; color:#a1a1aa; font-size:14px;">Loading...</div>
                     </div>
+                    
                     <div id="ki-activity-tab" class="ki-tab-content"></div>
+
+                    <div id="ki-chat-tab" class="ki-tab-content">
+                        <div style="display:flex; flex-direction:column; gap:10px; height: 500px;">
+                            <div style="display:flex; flex-direction:column; gap:8px; background:#14171c; padding:12px; border-radius:6px; border:1px solid #24272c; flex-shrink: 0;">
+                                <input type="text" id="ki-chat-search" placeholder="Search @username or message..." style="width:100%; padding:8px 12px; border-radius:4px; border:1px solid #24272c; background:#0f1115; color:#fff; font-size:13px; outline:none; box-sizing: border-box;">
+                                <div style="display:flex; gap:8px; flex-wrap:wrap;" id="ki-chat-filters">
+                                    <button class="ki-filter-btn" data-filter="mods" style="background:#24272c; color:#a1a1aa; border:none; padding:4px 10px; border-radius:4px; font-size:12px; cursor:pointer; transition:all 0.2s;">Mods</button>
+                                    <button class="ki-filter-btn" data-filter="subs" style="background:#24272c; color:#a1a1aa; border:none; padding:4px 10px; border-radius:4px; font-size:12px; cursor:pointer; transition:all 0.2s;">Subs</button>
+                                    <button class="ki-filter-btn" data-filter="bots" style="background:#24272c; color:#a1a1aa; border:none; padding:4px 10px; border-radius:4px; font-size:12px; cursor:pointer; transition:all 0.2s;">Bots</button>
+                                    <button class="ki-filter-btn" data-filter="emoji" style="background:#24272c; color:#a1a1aa; border:none; padding:4px 10px; border-radius:4px; font-size:12px; cursor:pointer; transition:all 0.2s;">Emoji/Emote Only</button>
+                                </div>
+                            </div>
+                            <div id="ki-chat-log-container" style="flex:1; overflow-y:auto; background:#0f1115; padding:10px; border-radius:6px; display:flex; flex-direction:column; gap:4px; border:1px solid #24272c;"></div>
+                        </div>
+                    </div>
+
+                    <div id="ki-raw-tab" class="ki-tab-content" style="max-height: 500px; overflow-y: auto; background: #0f1115; padding: 10px; border-radius: 6px;"></div>
                 </div>
             </div>
         </div>
@@ -414,7 +488,7 @@ function openModal(channelData) {
     });
 
     const switchTab = (tabId) => {
-        ['profile', 'activity'].forEach(t => {
+        ['analytics', 'profile', 'activity', 'chat', 'raw'].forEach(t => {
             document.getElementById(`tab-btn-${t}`).classList.remove('active');
             document.getElementById(`ki-${t}-tab`).classList.remove('active');
         });
@@ -422,19 +496,142 @@ function openModal(channelData) {
         document.getElementById(`ki-${tabId}-tab`).classList.add('active');
     };
 
-    document.getElementById('tab-btn-profile').onclick = () => switchTab('profile');
-    document.getElementById('tab-btn-activity').onclick = () => {
-        switchTab('activity');
-        updateActivityTabIfOpen();
-    };
+    document.getElementById('tab-btn-analytics').onclick = () => { switchTab('analytics'); updateAnalyticsModalIfOpen(); };
+    document.getElementById('tab-btn-profile').onclick = () => { switchTab('profile'); };
+    document.getElementById('tab-btn-activity').onclick = () => { switchTab('activity'); updateActivityTabIfOpen(); };
+    document.getElementById('tab-btn-chat').onclick = () => { switchTab('chat'); updateChatLogTabIfOpen(); };
+    document.getElementById('tab-btn-raw').onclick = () => { switchTab('raw'); updateRawJsonTabIfOpen(); };
 
+    // Set up Chat Filters
+    const chatSearch = document.getElementById('ki-chat-search');
+    if (chatSearch) {
+        chatSearch.value = chatLogFilters.text;
+        chatSearch.addEventListener('input', (e) => {
+            chatLogFilters.text = e.target.value.toLowerCase();
+            updateChatLogTabIfOpen();
+        });
+    }
+
+    const filterBtns = document.querySelectorAll('.ki-filter-btn');
+    filterBtns.forEach(btn => {
+        const fType = btn.getAttribute('data-filter');
+        // Apply existing state to buttons on load
+        if (chatLogFilters[fType]) {
+            btn.style.background = '#3b82f6'; btn.style.color = '#fff';
+        }
+        btn.addEventListener('click', () => {
+            chatLogFilters[fType] = !chatLogFilters[fType]; // Toggle logic
+            if (chatLogFilters[fType]) {
+                btn.style.background = '#3b82f6'; btn.style.color = '#fff';
+            } else {
+                btn.style.background = '#24272c'; btn.style.color = '#a1a1aa';
+            }
+            updateChatLogTabIfOpen();
+        });
+    });
+
+    // Initial renders
+    updateAnalyticsModalIfOpen();
     renderData(channelData);
     updateActivityTabIfOpen();
+    updateChatLogTabIfOpen();
+    updateRawJsonTabIfOpen();
+}
+
+function updateChatLogTabIfOpen() {
+    const chatTab = document.getElementById('ki-chat-tab');
+    if (!chatTab || !chatTab.classList.contains('active')) return;
+
+    const container = document.getElementById('ki-chat-log-container');
+    if (!container) return;
+
+    if (chatAnalytics.chatLog.length === 0) {
+        container.innerHTML = `<div style="text-align:center; color:#71717a; padding: 30px 0; font-size: 14px;">Waiting for messages...</div>`;
+        return;
+    }
+
+    const { text, mods, subs, bots, emoji } = chatLogFilters;
+    const hasRoleFilter = mods || subs || bots;
+
+    const filtered = chatAnalytics.chatLog.filter(msg => {
+        // Text Match Logic
+        if (text && !msg.lowerUsername.includes(text) && !msg.content.toLowerCase().includes(text)) {
+            return false;
+        }
+
+        // Emoji/Emote Only Toggle
+        if (emoji && !msg.isEmoji) return false;
+
+        // Role Flags (Acts as OR logic if multiple role filters are active)
+        if (hasRoleFilter) {
+            if (!((mods && msg.isMod) || (subs && msg.isSub) || (bots && msg.isBot))) {
+                return false;
+            }
+        }
+        return true;
+    });
+
+    // Performance constraint: only render top 200 matches at a time
+    const displayList = filtered.slice(0, 200);
+
+    let html = '';
+    for (const msg of displayList) {
+        let badgesHtml = '';
+        if (msg.isMod) badgesHtml += `<span style="background:#ef4444; color:#fff; font-size:10px; padding:2px 4px; border-radius:3px; margin-right:4px;">MOD</span>`;
+        if (msg.isSub) badgesHtml += `<span style="background:#53fc18; color:#000; font-size:10px; padding:2px 4px; border-radius:3px; margin-right:4px;">SUB</span>`;
+        if (msg.isBot) badgesHtml += `<span style="background:#8b5cf6; color:#fff; font-size:10px; padding:2px 4px; border-radius:3px; margin-right:4px;">BOT</span>`;
+
+        // Safely escape html elements from malicious chat strings, strip line breaks, then inject Emote Images
+        const cleanContent = msg.content.trim().replace(/[\r\n]+/g, ' ');
+        const safeContent = escapeHtml(cleanContent);
+        const displayContent = safeContent.replace(/\[emote:(\d+):([^\]]+)\]/g, `<img src="https://files.kick.com/emotes/$1/fullsize" alt="$2" title="$2" style="height:20px; vertical-align:text-bottom; margin:0 2px; display:inline-block;">`);
+
+        html += `
+            <div style="font-size:13px; line-height:28px; word-break:break-word; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.05);">
+                <span style="color:#71717a; font-size:11px; margin-right:6px;">${msg.timestamp}</span>
+                ${badgesHtml}
+                <strong style="color:${msg.color || '#fff'}; margin-right:6px;">${escapeHtml(msg.username)}:</strong>
+                <span style="color:#d4d4d8; display:inline; vertical-align:baseline;">${displayContent}</span>
+            </div>
+        `;
+    }
+
+    if (filtered.length > 200) {
+        html += `<div style="text-align:center; color:#71717a; font-size:12px; margin-top:8px;">Showing 200 of ${filtered.length} matches...</div>`;
+    }
+    if (filtered.length === 0) {
+        html = `<div style="text-align:center; color:#71717a; padding: 30px 0; font-size: 14px;">No messages match your filters.</div>`;
+    }
+
+    container.innerHTML = html;
+}
+
+function updateRawJsonTabIfOpen() {
+    const rawTab = document.getElementById('ki-raw-tab');
+    // Only update DOM if the tab is visible to prevent massive performance lag
+    if (!rawTab || !rawTab.classList.contains('active')) return;
+
+    if (chatAnalytics.rawEvents.length === 0) {
+        rawTab.innerHTML = `<div style="text-align:center; color:#71717a; padding: 30px 0; font-size: 14px;">Waiting for real-time events...</div>`;
+        return;
+    }
+
+    let html = `<div style="display:flex; flex-direction:column; gap:8px;">`;
+    for (const item of chatAnalytics.rawEvents) {
+        html += `
+            <div style="background:#1a1d22; padding:12px; border-radius:6px; border: 1px solid #24272c;">
+                <div style="font-size:11px; color:#3b82f6; margin-bottom:6px;">${item.timestamp}</div>
+                <pre style="margin:0; font-family:monospace; font-size:12px; color:#a1a1aa; white-space:pre-wrap; word-break:break-word;">${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre>
+            </div>
+        `;
+    }
+    html += `</div>`;
+    rawTab.innerHTML = html;
 }
 
 function updateActivityTabIfOpen() {
     const activityTab = document.getElementById('ki-activity-tab');
-    if (!activityTab) return;
+    if (!activityTab || !activityTab.classList.contains('active')) return;
 
     let html = `
         <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: 8px; padding: 12px; margin-bottom: 16px; display: flex; gap: 8px; align-items: flex-start;">
@@ -480,36 +677,9 @@ function createCard(label, value, tooltipText, valueClass = "", customStyle = ""
     `;
 }
 
-function openAnalyticsModal(channelData) {
-    const existing = document.getElementById('kick-inspector-root');
-    if (existing) existing.remove();
-
-    const root = document.createElement('div');
-    root.id = 'kick-inspector-root';
-    root.innerHTML = `
-        <div class="ki-modal-overlay">
-            <div class="ki-modal" style="max-width: 800px;">
-                <div class="ki-modal-header">
-                    <h2 style="margin:0; font-size:16px; font-weight:700; display:flex; align-items:center; gap:8px;">
-                        ${icons.activity} Live Analytics: <span style="color:#53fc18">@${channelData.slug}</span>
-                    </h2>
-                    <button class="ki-modal-close" id="ki-close-btn">${icons.close}</button>
-                </div>
-                <div class="ki-modal-content" id="ki-analytics-content"></div>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(root);
-    document.getElementById('ki-close-btn').onclick = () => root.remove();
-    root.querySelector('.ki-modal-overlay').addEventListener('click', (e) => {
-        if(e.target === e.currentTarget) root.remove();
-    });
-    updateAnalyticsModalIfOpen();
-}
-
 function updateAnalyticsModalIfOpen() {
-    const container = document.getElementById('ki-analytics-content');
-    if (!container) return;
+    const container = document.getElementById('ki-analytics-tab');
+    if (!container || !container.classList.contains('active')) return;
 
     const now = Date.now();
     const elapsedMs = now - chatAnalytics.startTime;
@@ -598,6 +768,9 @@ function updateAnalyticsModalIfOpen() {
 }
 
 function renderData(data) {
+    const profileTab = document.getElementById('ki-profile-tab');
+    if (!profileTab) return;
+
     const user = data.user || {};
     const cr = data.chatroom || {};
     const boolIcon = (val) => val ? icons.check : icons.x;
@@ -607,10 +780,10 @@ function renderData(data) {
             <img src="${user.profile_pic || ''}" style="width:64px; height:64px; border-radius:50%; background:#24272c; object-fit:cover;" onerror="this.style.display='none'">
             <div>
                 <h1 style="margin:0 0 4px 0; font-size:20px; display:flex; align-items:center; gap:6px;">
-                    ${user.username || data.slug}
+                    ${escapeHtml(user.username || data.slug)}
                     ${data.verified ? `<span style="color:#53fc18" title="Verified">${icons.check}</span>` : ''}
                 </h1>
-                <div style="color:#a1a1aa; font-size:13px; line-height:1.5;">${user.bio || 'No bio provided.'}</div>
+                <div style="color:#a1a1aa; font-size:13px; line-height:1.5;">${escapeHtml(user.bio) || 'No bio provided.'}</div>
             </div>
         </div>
         <div class="ki-grid" style="margin-top: 16px;">
@@ -664,8 +837,7 @@ function renderData(data) {
             </div>
         </div>
     `;
-    const profileTab = document.getElementById('ki-profile-tab');
-    if (profileTab) profileTab.innerHTML = html;
+    profileTab.innerHTML = html;
 }
 
 async function handleDomMutation() {
